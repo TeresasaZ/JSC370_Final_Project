@@ -1,0 +1,410 @@
+---
+title: "JSC370 Final Project"
+author: "Teresa Zhao"
+output: 
+    html_document:
+        toc: TRUE
+        toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = TRUE, warning=FALSE, message=FALSE)
+```
+
+# {.tabset}
+
+## Project Description 
+
+### Introduction
+
+Urban traffic congestion is a key urban planning challenge. This project investigates which factors influence traffic volume in Toronto, using data from 2018–2022. While my midterm focused on fuel prices alone, this final project expands the analysis to explore additional variables such as time of day, weekday/weekend patterns, and the COVID-19 pandemic period.
+
+### Research Question
+
+What are the key factors that influence traffic volume in Toronto?
+
+### Data Sources
+
+Traffic Volume: Toronto Open Data (15-minute intervals)
+
+Fuel Prices: Open Canada (monthly taxed fuel prices in Toronto)
+
+## Interactive Plots
+
+```{r eval=FALSE}
+install.packages("data.table")
+install.packages("patchwork")
+install.packages("gridExtra")
+install.packages("forcats")
+```
+
+```{r, echo=FALSE, eval=TRUE}
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(data.table)
+library(patchwork)
+library(gridExtra)
+library(ggplot2)
+library(forcats)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+library(xgboost)
+library(caret)
+library(doParallel)
+library(plotly)
+library(leaflet)
+library(knitr)
+library(mgcv)
+```
+
+```{r}
+# Define API endpoint (replace {resource_id} with actual resource ID)
+resource_id <- "19499837-c088-448f-8c80-f210a75aecb4"
+api_url <- paste0("https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/traffic-volumes-midblock-vehicle-speed-volume-and-classification-counts/resource/", resource_id, "/download/svc_raw_data_volume_2015_2019.csv")
+
+# Send GET request
+response <- GET(api_url)
+dat_2018 <- fread(httr::content(response, as = "text"))
+```
+
+```{r}
+# Define the correct resource ID for the 2019-2024 volume dataset
+resource_id_2024 <- "8581f033-82ee-49fa-b18e-d112d92a6e7e"
+
+# Construct the API request URL
+api_url_2024 <- paste0("https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/traffic-volumes-midblock-vehicle-speed-volume-and-classification-counts/resource/", resource_id_2024, "/download/svc_raw_data_volume_2019_2024.csv")
+
+# Send the GET request
+response_2024 <- GET(api_url_2024)
+
+# Read the CSV data into R
+dat_traffic_2024 <- fread(httr::content(response_2024, as = "text"))
+```
+
+```{r}
+api_url <- "https://ontario.ca/v1/files/fuel-prices/canadianpumppricesall.csv"
+fuel_prices <- fread(api_url)
+```
+
+```{r}
+dat_filtered <- dat_2018[time_start >= "2018-01-01 00:00:00"]
+```
+
+```{r}
+# Ensure both datasets have the same column names before merging
+dat_traffic_combined <- rbind(dat_filtered, dat_traffic_2024, fill = TRUE)
+```
+
+```{r}
+# Extract year and month from time_start in dat_traffic_combined
+dat_traffic_combined <- dat_traffic_combined %>%
+  mutate(month = format(as.Date(time_start), "%Y-%m"))
+
+# Extract year and month from Date in fuel_prices
+fuel_prices <- fuel_prices %>%
+  mutate(month = format(as.Date(Date), "%Y-%m"))
+
+# Merge datasets based on month
+merged_data <- merge(dat_traffic_combined, fuel_prices, by = "month", all = FALSE, allow.cartesian = TRUE)
+```
+
+```{r}
+merged_data <- merged_data %>%
+  mutate(actual_date = as.Date(time_start))
+```
+
+```{r}
+merged_data <- merged_data %>%
+  mutate(
+    location_name = as.factor(location_name),
+    direction = as.factor(direction),
+    `Tax Status` = as.factor(`Tax Status`)  # Ensure backticks for column with space
+  )
+```
+
+```{r}
+filtered_data <- merged_data %>%
+  filter(`Tax Status` == "Total")
+```
+
+```{r, fig.show='show', fig.cap="Interactive plot comparing hourly traffic volume patterns on weekdays versus weekends"}
+# Create hour variable for plotting
+filtered_data <- filtered_data %>%
+  mutate(hour = as.numeric(format(time_start, "%H")))
+
+# Prepare the data
+filtered_data$weekday_label <- ifelse(filtered_data$is_weekend == 1, "Weekend", "Weekday")
+
+hourly_summary <- filtered_data %>%
+  group_by(weekday_label, hour) %>%
+  summarise(avg_volume = mean(volume_15min, na.rm = TRUE), .groups = "drop")
+
+# Interactive scatter plot
+plot1 <- ggplot(hourly_summary, aes(x = hour, y = avg_volume, color = weekday_label)) +
+  geom_point(size = 2) +
+  geom_line() +
+  labs(
+    title = "Average Traffic Volume by Hour: Weekday vs Weekend",
+    x = "Hour of Day",
+    y = "Average 15-min Volume",
+    color = "Day Type"
+  ) +
+  theme_minimal()
+
+ggplotly(plot1)
+```
+
+```{r, fig.show='show', fig.cap="Interactive Leaflet map of average traffic volume by location in Toronto (2018–2022)"}
+# Average volume by location
+location_map_data <- filtered_data %>%
+  group_by(location_name, latitude, longitude) %>%
+  summarise(avg_volume = mean(volume_15min, na.rm = TRUE)) %>%
+  ungroup()
+
+# Create Leaflet map
+leaflet(location_map_data) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    radius = ~sqrt(avg_volume), color = "blue", stroke = FALSE,
+    fillOpacity = 0.6,
+    popup = ~paste("Location:", location_name,
+                   "<br>Avg Volume:", round(avg_volume, 1))
+  ) %>%
+  setView(lng = -79.38, lat = 43.65, zoom = 11)
+```
+
+```{r, fig.show='show', fig.cap="3D scatter plot showing the relationship between hour of day, fuel price, and 15-minute traffic volume (sample of 1,000 observations)"}
+# Sample data from your actual dataset
+plot_data <- filtered_data %>%
+  sample_n(1000) %>%  # subset if too large
+  mutate(hour = as.numeric(hour),
+         fuel_price = Toronto,
+         volume = volume_15min)
+
+# 3D scatter
+plot_ly(
+  data = plot_data,
+  x = ~hour, y = ~fuel_price, z = ~volume,
+  type = "scatter3d", mode = "markers",
+  marker = list(size = 3, color = ~volume, colorscale = "Viridis"),
+  hoverinfo = "text",
+  text = ~paste("Hour:", hour, "<br>Fuel Price:", fuel_price, "<br>Volume:", volume)
+) %>%
+  layout(title = "3D Scatter: Hour vs Fuel Price vs Volume")
+```
+
+## Results
+
+### Modeling
+
+This project fits two types of models:
+
+**Statistical**: Generalized Additive Models (GAM)
+
+**Machine Learning**: Regression Tree, Bagging, Random Forest, Boosting, XGBoost
+
+### Best GAM Model
+
+```{r}
+filtered_data <- filtered_data %>%
+  mutate(log_volume = log(volume_15min + 1))
+
+filtered_data <- filtered_data %>%
+  mutate(
+    weekday = weekdays(actual_date),
+    is_weekend = ifelse(weekday %in% c("Saturday", "Sunday"), 1, 0),
+    hour = as.numeric(format(time_start, "%H")),
+    pandemic = ifelse(actual_date >= as.Date("2020-03-01") & actual_date <= as.Date("2022-03-01"), 1, 0)
+  )
+
+```
+
+```{r}
+# Run this if you haven’t already fitted gam_model2
+library(mgcv)
+gam_model2 <- gam(log_volume ~ 
+                    s(hour, bs = "cr") + 
+                    s(Toronto, bs = "cr") +
+                    is_weekend * pandemic,
+                  data = filtered_data)
+```
+
+```{r}
+# Summary of parametric terms
+model2_summary <- summary(gam_model2)
+kable(model2_summary$p.table, caption = "Parametric Terms (GAM Model 1)")
+```
+
+**Interpretation**: This model includes hour, fuel price, weekend indicator, pandemic period, and their interaction. Based on its EDF, GCV, and adjusted R², it offers the best trade-off between complexity and interpretability.
+
+---
+
+### Best Machine Learning Model: XGBoost
+
+```{r}
+# Train/test split
+set.seed(48)
+train_indices <- sample(1:nrow(filtered_data), 0.7 * nrow(filtered_data))
+train_data <- filtered_data[train_indices, ]
+test_data <- filtered_data[-train_indices, ]
+```
+
+
+```{r}
+# If not already done
+library(caret)
+library(xgboost)
+library(doParallel)
+
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+train_control <- trainControl(method = "cv", number = 10)
+tune_grid <- expand.grid(
+  nrounds = seq(100, 500, 100),
+  max_depth = c(2, 4, 6),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+xgb_model <- train(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = tune_grid,
+  na.action = na.omit
+)
+
+stopCluster(cl)
+```
+
+```{r}
+# Display best hyperparameters
+kable(xgb_model$bestTune, caption = "Best Hyperparameters for XGBoost")
+```
+
+```{r}
+# Variable importance plot
+plot(varImp(xgb_model), main = "XGBoost Variable Importance")
+```
+
+**Interpretation**: XGBoost outperformed all other models on prediction accuracy, achieving the lowest test MSE.
+
+---
+
+### Model Comparison Table
+
+```{r}
+# --- Regression Tree (Pruned) ---
+set.seed(123)
+tree_model <- rpart(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  method = "anova",
+  control = rpart.control(cp = 0)
+)
+
+cptable <- tree_model$cptable
+desired_terminal_nodes <- 5
+target_splits <- desired_terminal_nodes - 1
+chosen_cp <- cptable[which(cptable[, "nsplit"] == target_splits), "CP"]
+if(length(chosen_cp) == 0){
+  chosen_cp <- cptable[which.min(abs(cptable[, "nsplit"] - target_splits)), "CP"]
+}
+pruned_tree <- prune(tree_model, cp = chosen_cp)
+
+# --- Bagging ---
+set.seed(123)
+bagging_model <- randomForest(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  mtry = 4,
+  ntree = 500,
+  importance = TRUE
+)
+
+# --- Random Forest ---
+set.seed(123)
+rf_model <- randomForest(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  mtry = 2,
+  ntree = 500,
+  importance = TRUE
+)
+
+# --- Boosting ---
+set.seed(301)
+final_boost <- gbm(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  distribution = "gaussian",
+  n.trees = 1000,
+  interaction.depth = 3,
+  shrinkage = 0.1,
+  verbose = FALSE
+)
+
+# --- XGBoost ---
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+train_control <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+tune_grid <- expand.grid(
+  nrounds = seq(100, 500, by = 100),
+  max_depth = c(2, 4, 6),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(301)
+xgb_model <- train(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = tune_grid,
+  na.action = na.omit,
+  verbosity = 0
+)
+
+stopCluster(cl)
+```
+
+```{r}
+# Ensure test_data and all models are defined
+pred_tree <- predict(pruned_tree, newdata = test_data)
+mse_tree <- mean((pred_tree - test_data$log_volume)^2)
+
+pred_bagging <- predict(bagging_model, newdata = test_data)
+mse_bagging <- mean((pred_bagging - test_data$log_volume)^2)
+
+pred_rf <- predict(rf_model, newdata = test_data)
+mse_rf <- mean((pred_rf - test_data$log_volume)^2)
+
+pred_boost <- predict(final_boost, newdata = test_data, n.trees = 1000)
+mse_boost <- mean((pred_boost - test_data$log_volume)^2)
+
+pred_xgb <- predict(xgb_model, newdata = test_data)
+mse_xgb <- mean((pred_xgb - test_data$log_volume)^2)
+
+mse_results <- data.frame(
+  Method = c("Regression Tree", "Bagging", "Random Forest", "Boosting", "XGBoost"),
+  Test_MSE = round(c(mse_tree, mse_bagging, mse_rf, mse_boost, mse_xgb), 4)
+)
+
+kable(mse_results, caption = "Test MSE for Each Regression Model")
+```
+

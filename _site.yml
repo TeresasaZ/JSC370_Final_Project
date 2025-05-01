@@ -1,0 +1,12 @@
+name: "JSC370 Final Project"
+output_dir: "."
+navbar:
+  title: "Tianhui (Teresa) Zhao's JSC370 Final Project Website"
+  left:
+    - text: "Home"
+      href: index.html
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2  # include ### in the TOC
