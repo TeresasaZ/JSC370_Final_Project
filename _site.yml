@@ -5,6 +5,9 @@ navbar:
   left:
     - text: "Home"
       href: index.html
+  right:
+    - text: "Final Project PDF Report"
+      href: https://github.com/TeresasaZ/JSC370_Final_Project/blob/master/Final%20Report.pdf
 output: 
   html_document:
     toc: true

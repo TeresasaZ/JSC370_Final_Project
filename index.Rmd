@@ -133,6 +133,14 @@ filtered_data <- merged_data %>%
 ```{r, fig.show='show', fig.cap="Interactive plot comparing hourly traffic volume patterns on weekdays versus weekends"}
 # Create hour variable for plotting
 filtered_data <- filtered_data %>%
+  mutate(
+    weekday = weekdays(actual_date),
+    is_weekend = ifelse(weekday %in% c("Saturday", "Sunday"), 1, 0),
+    hour = as.numeric(format(time_start, "%H")),
+    pandemic = ifelse(actual_date >= as.Date("2020-03-01") & actual_date <= as.Date("2022-03-01"), 1, 0)
+  )
+
+filtered_data <- filtered_data %>%
   mutate(hour = as.numeric(format(time_start, "%H")))
 
 # Prepare the data
