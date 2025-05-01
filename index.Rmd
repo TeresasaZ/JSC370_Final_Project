@@ -130,7 +130,7 @@ filtered_data <- merged_data %>%
   filter(`Tax Status` == "Total")
 ```
 
-```{r, fig.show='show', fig.cap="Interactive plot comparing hourly traffic volume patterns on weekdays versus weekends"}
+```{r, fig.show='show', fig.cap="Figure 6: Interactive plot comparing hourly traffic volume patterns on weekdays versus weekends"}
 # Create hour variable for plotting
 filtered_data <- filtered_data %>%
   mutate(
@@ -165,7 +165,9 @@ plot1 <- ggplot(hourly_summary, aes(x = hour, y = avg_volume, color = weekday_la
 ggplotly(plot1)
 ```
 
-```{r, fig.show='show', fig.cap="Interactive Leaflet map of average traffic volume by location in Toronto (2018–2022)"}
+**Figure 6** specifically compares hourly traffic volume patterns between weekdays and weekends. The plot highlights a clearer trend: on weekdays, there are two distinct peaks around 8 AM and 5 PM, corresponding to morning and evening commutes. In contrast, weekend traffic is more evenly distributed, with higher volumes around midnight and a single peak around noon.
+
+```{r, fig.show='show', fig.cap="Figure 8: Interactive Leaflet map of average traffic volume by location in Toronto (2018–2022)"}
 # Average volume by location
 location_map_data <- filtered_data %>%
   group_by(location_name, latitude, longitude) %>%
@@ -185,7 +187,9 @@ leaflet(location_map_data) %>%
   setView(lng = -79.38, lat = 43.65, zoom = 11)
 ```
 
-```{r, fig.show='show', fig.cap="3D scatter plot showing the relationship between hour of day, fuel price, and 15-minute traffic volume (sample of 1,000 observations)"}
+**Figure 8** displays traffic volumes by location, where larger circles represent higher average volumes. The map reveals that downtown Toronto and major routes—such as the Don Valley Parkway—experience significantly higher traffic, while suburban areas like Scarborough generally show lower average volumes.
+
+```{r, fig.show='show', fig.cap="Figure 9: 3D scatter plot showing the relationship between hour of day, fuel price, and 15-minute traffic volume (sample of 1,000 observations)"}
 # Sample data from your actual dataset
 plot_data <- filtered_data %>%
   sample_n(1000) %>%  # subset if too large
@@ -204,6 +208,8 @@ plot_ly(
 ) %>%
   layout(title = "3D Scatter: Hour vs Fuel Price vs Volume")
 ```
+
+**Figure 9** explores the relationship between traffic volume, fuel price, and hour of day using a 3D scatter plot. To keep the visualization concise and interpretable, a random sample of 1,000 observations was selected from the full dataset. By interacting with the 3D plot, it becomes evident that traffic volume does not follow a clear pattern with fuel price. In contrast, volume varies substantially with the hour of day—a trend consistent with earlier findings in **Figure 6**, where distinct peaks were observed during commuting hours.
 
 ## Results
 
