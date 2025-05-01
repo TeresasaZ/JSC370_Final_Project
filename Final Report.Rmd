@@ -1,0 +1,957 @@
+---
+title: "Final Report"
+author: "Tianhui Zhao"
+date: "2025-04"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = TRUE, results='hide', fig.show='hide', warning=FALSE, message=FALSE)
+```
+
+```{r eval=FALSE}
+install.packages("data.table")
+install.packages("patchwork")
+install.packages("gridExtra")
+install.packages("forcats")
+```
+
+```{r, echo=FALSE, eval=TRUE}
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(data.table)
+library(patchwork)
+library(gridExtra)
+library(ggplot2)
+library(forcats)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+library(xgboost)
+library(caret)
+library(doParallel)
+library(plotly)
+library(leaflet)
+library(knitr)
+library(mgcv)
+```
+
+# Introduction
+
+Urban traffic congestion is a critical issue in major metropolitan areas, affecting commuting efficiency, public safety, and environmental sustainability. In large countries such as Canada, where travel distances are significant and alternatives to driving are limited, understanding the factors that influence traffic volume is vital for better urban planning and policymaking.
+
+In the midterm project, I initially explored the relationship between fuel prices and traffic volume in Toronto. The preliminary results showed that when treated as a continuous variable, fuel price had an insignificant linear relationship with traffic volume. However, when fuel prices were categorized into "high" and "low" groups, a statistically significant difference in traffic volumes between the two groups was observed.
+
+Building upon these midterm findings, the final project extends the scope to a broader research question:
+
+> **"What are the key factors that influence traffic volume in Toronto?"**
+
+Rather than focusing solely on fuel price, this project considers multiple possible influencers identified during exploratory data analysis, including:
+- **Hour of the day** (rush hours vs non-rush hours)
+- **Weekend vs. Weekday** distinctions
+- **Pandemic periods** vs non-pandemic periods
+- **Fuel price**
+
+The goals of this project are to:
+1. Model traffic volume using numerical predictors and flexible methods such as Generalized Additive Models (GAMs).
+2. Explore different tree-based machine learning methods (decision trees, bagging, random forests, boosting, and XGBoost) to predict traffic volume.
+3. Create interactive visualizations to enhance communication of traffic patterns across time and contexts.
+
+## Data Sources
+
+The dataset combines traffic volume and fuel price data:
+
+- **Traffic Volume Data**: Extracted from Toronto Open Data, including vehicle counts at midblock locations, recorded in 15-minute intervals from 2018 to 2022, specific 15 min interval times, specific street locations, longitude and latitude. (2015-2019 traffic data and 2019-2024 traffic data were obtained separately).
+
+https://open.toronto.ca/dataset/traffic-volumes-midblock-vehicle-speed-volume-and-classification-counts/
+
+```{r}
+# Define API endpoint (replace {resource_id} with actual resource ID)
+resource_id <- "19499837-c088-448f-8c80-f210a75aecb4"
+api_url <- paste0("https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/traffic-volumes-midblock-vehicle-speed-volume-and-classification-counts/resource/", resource_id, "/download/svc_raw_data_volume_2015_2019.csv")
+
+# Send GET request
+response <- GET(api_url)
+dat_2018 <- fread(httr::content(response, as = "text"))
+```
+
+```{r}
+# Define the correct resource ID for the 2019-2024 volume dataset
+resource_id_2024 <- "8581f033-82ee-49fa-b18e-d112d92a6e7e"
+
+# Construct the API request URL
+api_url_2024 <- paste0("https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/traffic-volumes-midblock-vehicle-speed-volume-and-classification-counts/resource/", resource_id_2024, "/download/svc_raw_data_volume_2019_2024.csv")
+
+# Send the GET request
+response_2024 <- GET(api_url_2024)
+
+# Read the CSV data into R
+dat_traffic_2024 <- fread(httr::content(response_2024, as = "text"))
+
+# Print a summary to check the data
+print(head(dat_traffic_2024))
+```
+  
+- **Fuel Price Data**: Downloaded from Open Canada, providing monthly gasoline prices (tax-included) for Toronto.
+
+https://open.canada.ca/data/en/dataset/3ff1e1de-d665-4398-a12a-e8ce55f887ac/resource/af4537fc-1bf3-4b3a-b093-ebc633c2a21a
+
+```{r}
+api_url <- "https://ontario.ca/v1/files/fuel-prices/canadianpumppricesall.csv"
+fuel_prices <- fread(api_url)
+```
+
+\newpage
+# Methods
+
+## Data cleaning and wrangling
+
+### Data Cleaning
+
+Filtering Data: Traffic data from 2015–2024 was filtered to include only records from 2018 onward, ensuring alignment with fuel price records, which begin in 2018.
+
+```{r}
+dat_filtered <- dat_2018[time_start >= "2018-01-01 00:00:00"]
+```
+
+Then, I combined the two traffic volume datasets to get a complete 2018-2024 traffic volume dataset.
+
+```{r}
+# Ensure both datasets have the same column names before merging
+dat_traffic_combined <- rbind(dat_filtered, dat_traffic_2024, fill = TRUE)
+```
+
+Handling Missing Values: Both traffic and pricing datasets were checked for missing values, empty strings, and "NULL" values. There were no missing values, so no need to make changes.
+ 
+Unique location names and direction from traffic dataset, and unique tax status from pricing dataset were also checked to ensure there were no string placeholders exist. Unique values from these string variables are normal. No placeholders exist.
+ 
+Then, I checked for import issues using dim(), head(), tail(), str() and summary() for both traffic and fuel price datasets. There were no issues by checking these tables. 
+Among the key variables, time start is of Date type, direction is of character type, and volume and fuel price are numeric.
+
+### Data Wrangling
+
+Traffic volume dataset only has time-related variable as `time_start` and `time_end`, which are two variables representing each 15-min interval observation. These two times are too specific as they include year, month, day, hour, minute and second. However, the pricing dataset only has a `Date` variable that represents the observation of fuel price per month (which are all on the first day of each month). Due to this situation, I created a `month` variable in each dataset and merged them by month. `month` is extracted from the dates or time from the two datasets. 
+
+```{r}
+# Extract year and month from time_start in dat_traffic_combined
+dat_traffic_combined <- dat_traffic_combined %>%
+  mutate(month = format(as.Date(time_start), "%Y-%m"))
+
+# Extract year and month from Date in fuel_prices
+fuel_prices <- fuel_prices %>%
+  mutate(month = format(as.Date(Date), "%Y-%m"))
+
+# Merge datasets based on month
+merged_data <- merge(dat_traffic_combined, fuel_prices, by = "month", all = FALSE, allow.cartesian = TRUE)
+```
+
+Although pricing data was observed monthly, observing traffic data in the same way would result in too few data points. So, I created a `actual_date` variable to extract the actual dates (year-month-day) traffic volumes were observed so I can observe daily data. 
+
+```{r}
+merged_data <- merged_data %>%
+  mutate(actual_date = as.Date(time_start))
+```
+
+By examining the number of unique locations per date and other details of the merged dataset using functions like `str()` and `unique()`, I found that each 15-minute interval includes different observation locations. These locations may overlap or vary, and the number of observed locations fluctuates. Additionally, within a single 15-minute interval, a street can be monitored from multiple directions. As a result, the number of observations per time interval varies due to differences in both the observed locations and the recorded directions. Therefore, I chose to analyze the average daily traffic volume. This approach ensures a sufficient number of data points while also accounting for discrepancies in the number of observations per time interval.
+ 
+Before analyzing the dataset, I factored the three string variables: location name, direction and tax status. 
+
+```{r}
+merged_data <- merged_data %>%
+  mutate(
+    location_name = as.factor(location_name),
+    direction = as.factor(direction),
+    `Tax Status` = as.factor(`Tax Status`)  # Ensure backticks for column with space
+  )
+```
+
+Lastly, it was unnecessary to retain all three fuel price categories—untaxed, taxed, and total. Therefore, I kept only the **taxed** price (total price), as it provides the most comprehensive representation of fuel costs.
+
+```{r}
+filtered_data <- merged_data %>%
+  filter(`Tax Status` == "Total")
+```
+
+The cleaned dataset is now ready for exploratory analysis and modeling.
+
+\newpage
+## Exploratory Data Analysis (EDA)
+
+This section explores the distribution of key variables, identifies patterns in traffic volume over time and across contexts, and examines fuel price variation. The goal is to guide model selection by uncovering structure in the data and assessing assumptions such as skewness and non-linearity.
+
+### Distribution of Traffic Volume
+
+To understand the general shape of traffic flow in Toronto, a histogram of volume_15min was plotted. The distribution is highly right-skewed, with most values concentrated at lower counts and a long tail extending toward higher volumes. This pattern suggests that most recorded traffic volumes are low, while a small number of locations or time periods experience significantly higher traffic. The pronounced skewness indicates that a log transformation of the response variable is appropriate, or that a flexible modeling approach should be used to capture potential non-linear patterns.
+
+```{r, fig.show='show', fig.cap="Histogram of raw 15-minute traffic volume"}
+ggplot(filtered_data, aes(x = volume_15min)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white", alpha = 0.8) +
+  labs(
+    title = "Figure 1: Distribution of Raw 15-Minute Traffic Volume",
+    x = "Traffic Volume (15-min interval)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+**Figure 2** presents a boxplot of 15-minute traffic volume across different hours of the day. The plot reveals noticeable variation in volume dispersion by hour—particularly higher variability during peak commuting times—which indicates heteroscedasticity. This violation of the constant variance assumption undermines the suitability of a standard linear model for traffic volume prediction, motivating the use of more flexible modeling approaches.
+
+```{r, fig.show='show', fig.width=6, fig.height=3, fig.cap="Boxplot showing the distribution and spread of 15-minute traffic volume by hour of day"}
+# shows variance changes.
+filtered_data %>%
+  mutate(hour = as.numeric(format(time_start, "%H"))) %>%
+  ggplot(aes(x = factor(hour), y = volume_15min)) +
+  geom_boxplot(fill = "lightblue", outlier.shape = NA) +
+  labs(
+    title = "Traffic Volume Distribution by Hour",
+    x = "Hour of Day",
+    y = "15-min Traffic Volume"
+  ) +
+  theme_minimal()
+
+```
+
+**Figure 3** displays the distribution of log-transformed 15-minute traffic volume. Although the log transformation reduces some of the right skew observed in the raw data, the distribution remains non-normal and notably asymmetric. This suggests that linear modeling may still be inappropriate, as the assumptions of normality and linearity in the residuals are likely violated.
+
+```{r, fig.show='show', fig.width=6, fig.height=3, fig.cap="Histogram of Log-Transformed 15-Minute Traffic Volume"}
+# Ensure log_volume is created
+filtered_data <- filtered_data %>%
+  mutate(log_volume = log(volume_15min + 1))  # Add 1 to avoid log(0)
+
+# Plot histogram
+ggplot(filtered_data, aes(x = log_volume)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribution of Log-Transformed 15-Minute Traffic Volume",
+    x = "Log(Traffic Volume)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+### Traffic Volume Over Time
+
+To examine how average daily traffic volume changed over the years (2018–2022), an interactive time series plot was created. Hovering over the plot reveals the date and exact volume for each point. A notable drop is visible during the COVID-19 pandemic period, which may reflect either a true reduction in vehicle movement due to lockdowns and remote work, or disruptions in data collection during that time. In either case, the sharp shift is significant and warrants consideration in modeling. To emphasize this period, a shaded region was added to the plot, and a new `pandemic` variable was created to indicate whether each observation falls within the pandemic window (March 2020 to March 2022). (See Figure 6 on the project website.)
+ 
+Additionally, a sharp drop at the end of July 2022 appears in the plot. This likely reflects incomplete or placeholder data, rather than a genuine decline in traffic volume. As such, the tail end of the time series should be interpreted with caution and not viewed as evidence of a structural change.
+
+```{r, fig.show='show', fig.cap="Interactive time series plot of average daily traffic volume."}
+# replace line plot
+# Aggregate to daily
+daily_data <- filtered_data %>%
+  group_by(actual_date) %>%
+  summarize(avg_volume = mean(volume_15min, na.rm = TRUE))
+
+# Plot
+plot_ly(daily_data, x = ~actual_date, y = ~avg_volume,
+        type = 'scatter', mode = 'lines') %>%
+  layout(title = "Average Daily Traffic Volume Over Time",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Average Volume"),
+         shapes = list(
+           list(type = "rect",
+                x0 = as.Date("2020-03-01"), x1 = as.Date("2022-03-01"),
+                y0 = 0, y1 = max(daily_data$avg_volume, na.rm = TRUE),
+                fillcolor = 'pink', opacity = 0.3, line = list(width = 0))
+         ))
+
+```
+
+```{r}
+filtered_data <- filtered_data %>%
+  mutate(
+    pandemic = ifelse(actual_date >= as.Date("2020-03-01") & actual_date <= as.Date("2022-03-01"), 1, 0)
+  )
+```
+
+The table below shows the discrepancy in the number of observations between the pandemic and non-pandemic periods. While this imbalance may reflect a limitation in the dataset—due to reduced data collection or reporting during the pandemic—it is nonetheless important to account for in modeling. 
+
+```{r, results='show'}
+# table 1
+filtered_data %>%
+  count(pandemic) %>%
+  mutate(pandemic = ifelse(pandemic == 1, "Pandemic", "Non-Pandemic")) %>%
+  kable(col.names = c("Period", "Count"), caption = "Number of observations during and outside the pandemic period.")
+```
+
+### Traffic Volume by Day of Week and Hour
+
+Next, I explored how traffic volume varies by hour of the day and day of the week.
+ 
+**Figure 5** presents a heatmap of average traffic volume by hour and weekday. On weekdays, traffic is lowest before 6 AM and after 10 PM, with two clear peaks around 8 AM and 5 PM that align with typical commuting hours. On weekends, traffic begins to increase later in the morning—around 8 AM—and tapers off after 7 PM. The absence of sharp peaks during traditional commute hours on weekends suggests reduced commuter traffic and different usage patterns.
+
+```{r, fig.show='show', fig.width=6, fig.height=3, fig.cap="Heatmap of traffic volume by hour and weekday"}
+heat <- filtered_data %>%
+  mutate(hour = as.numeric(format(time_start, "%H")),
+         weekday = weekdays(actual_date))
+
+heatmap_data <- heat %>%
+  group_by(weekday, hour) %>%
+  summarize(avg_volume = mean(volume_15min, na.rm = TRUE)) 
+
+ggplot(heatmap_data, aes(x = hour, y = fct_relevel(weekday, c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")), fill = avg_volume)) +
+  geom_tile() +
+  scale_fill_gradient(low = "lightblue", high = "darkred") +
+  labs(title = "Traffic Volume Heatmap by Hour and Weekday",
+       x = "Hour of the Day",
+       y = "Day of the Week",
+       fill = "Avg Volume") +
+  theme_minimal()
+
+```
+
+**Figure 6** (see project website) specifically compares hourly traffic volume patterns between weekdays and weekends. The plot highlights a clearer trend: on weekdays, there are two distinct peaks around 8 AM and 5 PM, corresponding to morning and evening commutes. In contrast, weekend traffic is more evenly distributed, with higher volumes around midnight and a single peak around noon. 
+
+```{r, fig.cap="Interactive plot comparing hourly traffic volume patterns on weekdays versus weekends"}
+# Create hour variable for plotting
+filtered_data <- filtered_data %>%
+  mutate(hour = as.numeric(format(time_start, "%H")))
+
+# Prepare the data
+filtered_data$weekday_label <- ifelse(filtered_data$is_weekend == 1, "Weekend", "Weekday")
+
+hourly_summary <- filtered_data %>%
+  group_by(weekday_label, hour) %>%
+  summarise(avg_volume = mean(volume_15min, na.rm = TRUE), .groups = "drop")
+
+# Interactive scatter plot
+plot1 <- ggplot(hourly_summary, aes(x = hour, y = avg_volume, color = weekday_label)) +
+  geom_point(size = 2) +
+  geom_line() +
+  labs(
+    title = "Average Traffic Volume by Hour: Weekday vs Weekend",
+    x = "Hour of Day",
+    y = "Average 15-min Volume",
+    color = "Day Type"
+  ) +
+  theme_minimal()
+
+ggplotly(plot1)
+```
+
+The visualizations suggest meaningful variation in traffic volume across both hours of the day and days of the week. To capture this temporal structure, I considered two options for modeling: a categorical `weekday` variable to represent each day individually, and a binary `is_weekend` indicator to capture the broader weekday–weekend contrast. Both variables were considered during model building process.
+
+```{r}
+filtered_data <- filtered_data %>%
+  mutate(
+    weekday = weekdays(actual_date),
+    is_weekend = ifelse(weekday %in% c("Saturday", "Sunday"), 1, 0)
+  )
+```
+
+### Fuel Price Distribution
+
+**Figure 7** shows a histogram of monthly taxed fuel prices in Toronto. The distribution appears fairly symmetric, with prices ranging from approximately 90 to 160 cents per liter.
+
+```{r, fig.show='show', fig.width=6, fig.height=3, fig.cap="Histogram of fuel prices in Toronto (2018–2022)."}
+ggplot(filtered_data, aes(x = Toronto)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white", alpha = 0.8) +
+  labs(
+    title = "Histogram of Toronto Fuel Prices",
+    x = "Fuel Price (¢/L)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+### Average Volume by Location
+
+To explore potential geographic patterns in traffic flow, an interactive Leaflet map was created to visualize the average traffic volume recorded at each monitoring location across Toronto.
+ 
+**Figure 8** (see project website) displays traffic volumes by location, where larger circles represent higher average volumes. The map reveals that downtown Toronto and major routes—such as the Don Valley Parkway—experience significantly higher traffic, while suburban areas like Scarborough generally show lower average volumes.
+ 
+This spatial heterogeneity in traffic patterns provided motivation to consider including `location_name` as a variable in the modeling process, particularly as a potential random effect in a GAM framework.
+
+```{r, fig.cap="Interactive Leaflet map of average traffic volume by location in Toronto (2018–2022)"}
+# Average volume by location
+location_map_data <- filtered_data %>%
+  group_by(location_name, latitude, longitude) %>%
+  summarise(avg_volume = mean(volume_15min, na.rm = TRUE)) %>%
+  ungroup()
+
+# Create Leaflet map
+leaflet(location_map_data) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    radius = ~sqrt(avg_volume), color = "blue", stroke = FALSE,
+    fillOpacity = 0.6,
+    popup = ~paste("Location:", location_name,
+                   "<br>Avg Volume:", round(avg_volume, 1))
+  ) %>%
+  setView(lng = -79.38, lat = 43.65, zoom = 11)
+```
+
+### 3D Exploration of Hour, Fuel Price, and Volume
+
+**Figure 9** (see project website) explores the relationship between traffic volume, fuel price, and hour of day using a 3D scatter plot. To keep the visualization concise and interpretable, a random sample of 1,000 observations was selected from the full dataset. By interacting with the 3D plot, it becomes evident that traffic volume does not follow a clear pattern with fuel price. In contrast, volume varies substantially with the hour of day—a trend consistent with earlier findings in **Figure 6**, where distinct peaks were observed during commuting hours.
+
+```{r, fig.cap="3D scatter plot showing the relationship between hour of day, fuel price, and 15-minute traffic volume (sample of 1,000 observations)"}
+# Sample data from your actual dataset
+plot_data <- filtered_data %>%
+  sample_n(1000) %>%  # subset if too large
+  mutate(hour = as.numeric(hour),
+         fuel_price = Toronto,
+         volume = volume_15min)
+
+# 3D scatter
+plot_ly(
+  data = plot_data,
+  x = ~hour, y = ~fuel_price, z = ~volume,
+  type = "scatter3d", mode = "markers",
+  marker = list(size = 3, color = ~volume, colorscale = "Viridis"),
+  hoverinfo = "text",
+  text = ~paste("Hour:", hour, "<br>Fuel Price:", fuel_price, "<br>Volume:", volume)
+) %>%
+  layout(title = "3D Scatter: Hour vs Fuel Price vs Volume")
+```
+
+### Preliminary Findings of Traffic Volume vs. Fuel Price
+
+Although the focus of this final project has expanded to examine multiple factors influencing traffic volume, I include here a key finding from the midterm analysis, which focused specifically on the relationship between traffic volume and fuel price. Retaining this result provides continuity and supports later modeling decisions involving fuel price as a potential predictor.
+
+```{r}
+# Step 1: Aggregate average traffic volume per day
+daily_traffic <- filtered_data %>%
+  group_by(actual_date) %>%
+  summarize(avg_daily_volume = mean(volume_15min, na.rm = TRUE))
+
+# Step 2: Aggregate fuel price per day
+daily_fuel_price <- filtered_data %>%
+  group_by(actual_date) %>%
+  summarize(avg_fuel_price = mean(Toronto, na.rm = TRUE))  # Take mean price per day
+
+# Step 3: Merge the two datasets by actual_date
+merged_daily_data <- merge(daily_traffic, daily_fuel_price, by = "actual_date", all = FALSE)
+
+# Step 4: Categorize fuel price into High and Low groups based on 75th percentile
+p75_fuel_price <- quantile(merged_daily_data$avg_fuel_price, probs = 0.75, na.rm = TRUE)
+
+merged_daily_data <- merged_daily_data %>%
+  mutate(fuel_category = ifelse(avg_fuel_price > p75_fuel_price, "High Price", "Low/Medium Price"))
+```
+
+
+```{r, results='show'}
+# Compute Pearson correlation
+correlation_value <- cor(merged_daily_data$avg_fuel_price, merged_daily_data$avg_daily_volume, use = "complete.obs")
+
+# Perform T-test
+t_test_result <- t.test(avg_daily_volume ~ fuel_category, data = merged_daily_data)
+
+# Create a data frame to store results
+stats_table <- data.frame(
+  Statistic = c("Pearson Correlation", "T-test p-value"),
+  Value = c(
+    round(correlation_value, 3),
+    round(t_test_result$p.value, 5)
+  )
+)
+
+# Print the table using knitr::kable()
+kable(stats_table, caption = "Summary of Statistical Tests: Correlation and T-test Results (75th Percentile Threshold)")
+```
+
+To explore the relationship between fuel price and traffic volume, a t-test was conducted by categorizing fuel prices into high and low/medium groups using the 75th percentile as the threshold—based on a recommendation to isolate more extreme price conditions. The result showed no statistically significant difference in traffic volume between the two groups (p > 0.05), suggesting that even when prices are unusually high, traffic patterns may not respond strongly.
+
+\newpage
+## Statistical Modeling
+
+This section presents the statistical modeling approaches used to analyze the factors influencing traffic volume in Toronto. Based on insights from the exploratory data analysis, several candidate predictors were identified for inclusion in the model: hour of the day, fuel price, an indicator for weekends or day of the week, a pandemic period indicator, and monitoring location.
+ 
+As shown in **Figure 3**, the log-transformed traffic volume exhibits a distinctly non-linear pattern. This, combined with the unequal distribution of average traffic volume across locations (**Figure 8**), suggests that linear models may not be appropriate due to violations of linearity and constant variance assumptions. In contrast, Generalized Additive Models (GAMs) provide a flexible framework capable of capturing complex, non-linear effects without requiring strict parametric forms. Accordingly, multiple GAM specifications were tested using different combinations of variables, and a final model was selected based on interpretability and model performance.
+  
+For the GAM models, the full dataset was used for fitting and inference, as the primary goal was interpretability and variable effect estimation.
+
+### Key Variable Summary
+
+**Table 3** and **Table 4** summarize the key variables considered for modeling. These include both original variables from the dataset and new variables created during the exploratory data analysis (EDA) process.
+
+```{r, results='show'}
+# Summarize numeric variables
+numeric_summary <- filtered_data %>%
+  select(volume_15min, log_volume, Toronto, hour) %>%
+  summary()
+
+# Summarize categorical variables: show number of levels
+factor_levels <- data.frame(
+  Variable = c("weekday", "is_weekend", "pandemic", "location_name"),
+  `# Levels` = sapply(filtered_data %>% select(weekday, is_weekend, pandemic, location_name), function(x) length(unique(x)))
+)
+
+# Print numeric summary
+kable(numeric_summary, caption = "Summary statistics for numeric variables")
+
+# Print factor level counts
+kable(factor_levels, caption = "Number of unique levels for categorical variables")
+```
+
+### Statistics Used
+
+\begin{itemize}
+\item p-value: Indicates the statistical significance of an individual variable. A p-value below 0.05 is typically considered statistically significant.
+
+\item EDF (Estimated Degrees of Freedom): Helps assess the complexity of smooth terms in a GAM. An EDF greater than 8 may suggest potential overfitting.
+
+\item Adjusted R-squared: Measures the proportion of variance explained by the model, adjusted for the number of predictors. Higher values indicate better model fit.
+
+\item GCV (Generalized Cross-Validation score): Estimates how well the model generalizes to unseen data. Lower GCV values indicate better generalizability.
+\end{itemize}
+
+### Model Specifications
+
+Model 1: log_volume ~ s(hour, bs = "cr") + s(Toronto, bs = "cr") + is_weekend * pandemic
+
+```{r}
+gam_model2 <- gam(log_volume ~ 
+                    s(hour, bs = "cr") + 
+                    s(Toronto, bs = "cr") +
+                    is_weekend * pandemic,
+                  data = filtered_data)
+```
+
+Model 2: log_volume ~ s(hour, bs = "cr") + s(Toronto, bs = "cr") + is_weekend + pandemic + s(location_name, bs = "re")
+
+```{r}
+gam_model3 <- gam(log_volume ~ 
+                    s(hour, bs = "cr") + 
+                    s(Toronto, bs = "cr") + 
+                    is_weekend + pandemic + 
+                    s(location_name, bs = "re"),  # random effect for location
+                  data = filtered_data)
+```
+
+Model 3: log_volume ~ s(hour, bs = "cr") + s(Toronto, bs = "cr") + weekday + pandemic
+
+```{r}
+gam_model4 <- gam(log_volume ~ 
+                    s(hour, bs = "cr") + 
+                    s(Toronto, bs = "cr") + 
+                    weekday + pandemic,
+                  data = filtered_data)
+```
+
+## Tree-Based Machine Learning Models
+
+### Models
+\begin{itemize}
+\item Regression tree: A single decision tree that splits the data into regions based on the values of predictor variables.
+\item Bagging: An ensemble method that builds many regression trees on bootstrap samples of the training data and averages their predictions.
+\item Random forest: An extension of bagging that adds randomness by selecting a random subset of predictors at each split.
+\item Boosting: A sequential ensemble method where each new tree focuses on correcting the errors of the previous one.
+\item XGBoost: An optimized version of boosting that includes regularization, efficient tree pruning, and parallel computation.
+\end{itemize}
+ 
+All models use hour of the day, fuel price, is_weekend indicator, and pandemic indicator as predictor variables. log-transformed traffic volume as response. 
+ 
+The data is split into 70% training data and 30% testing data. Training data is for training the models, and testing data is for testing accuracy of the models. 
+
+### Statistics
+
+We use testing MSE as the measure to determine model accuracy. MSE calculates the average of the squared differences between the actual values and the predicted values. Therefore, a lower MSE indicates better model accuracy.
+
+RMSE use metric to assess a model’s predictive accuracy and generalizability. It involves dividing the dataset into multiple folds, training the model on a subset of the data, and evaluating its performance on the remaining portion. This process is repeated across all folds, and the average RMSE across these iterations is computed
+
+\newpage
+
+# Results
+
+## Statistical Models
+
+Model 1 GCV: 0.586, R-adj: 0.586 \\
+Model 2 GCV: 0.23244, R-adj: 0.893 \\
+Model 3 GCV: 0.89521, R-adj: 0.588 \\
+(Apologies for unable to knitting them into the tables)
+
+To investigate the influence of key factors on traffic volume, I developed a series of Generalized Additive Models (GAMs).
+
+In the first model, I included four primary predictors identified during the EDA stage: hour of day, fuel price (Toronto), weekend indicator (is_weekend), and a binary pandemic indicator. An interaction term between is_weekend and pandemic was introduced to account for the possibility that traffic patterns on weekends were affected differently during the pandemic compared to weekdays—an effect supported by visual trends observed in the EDA.
+
+```{r, results='show'}
+# Model 2 Summary
+model2_summary <- summary(gam_model2)
+
+# Parametric terms
+parametric_table2 <- as.data.frame(model2_summary$p.table)
+parametric_table2 <- tibble::rownames_to_column(parametric_table2, var = "Term")
+
+# Smooth terms
+smooth_table2 <- as.data.frame(model2_summary$s.table)
+smooth_table2 <- tibble::rownames_to_column(smooth_table2, var = "Smooth Term")
+
+# Display both tables
+kable(parametric_table2, caption = "Parametric Terms for GAM Model 1")
+kable(smooth_table2, caption = "Smooth Terms for GAM Model 1")
+
+```
+
+In the second model, I extended the specification by including a location-level random effect using s(location_name, bs = "re"). This addition was motivated by the substantial variation in average traffic volume across different monitoring sites in Toronto, as revealed by the interactive Leaflet map.
+
+```{r, results='show'}
+# Model 3 Summary
+model3_summary <- summary(gam_model3)
+
+# Parametric terms
+parametric_table3 <- as.data.frame(model3_summary$p.table)
+parametric_table3 <- tibble::rownames_to_column(parametric_table3, var = "Term")
+
+# Smooth terms
+smooth_table3 <- as.data.frame(model3_summary$s.table)
+smooth_table3 <- tibble::rownames_to_column(smooth_table3, var = "Smooth Term")
+
+# Display both tables
+kable(parametric_table3, caption = "Parametric Terms for GAM Model 2")
+kable(smooth_table3, caption = "Smooth Terms for GAM Model 2")
+
+```
+
+Finally, in the third model, I replaced the binary is_weekend variable with a categorical variable representing the day of the week. This alternative approach allowed the model to capture finer-grained differences in traffic patterns between individual weekdays and weekends, rather than aggregating them into two broad categories.
+
+```{r, results='show'}
+# Model 4 Summary
+model4_summary <- summary(gam_model4)
+
+# Parametric terms
+parametric_table4 <- as.data.frame(model4_summary$p.table)
+parametric_table4 <- tibble::rownames_to_column(parametric_table4, var = "Term")
+
+# Smooth terms
+smooth_table4 <- as.data.frame(model4_summary$s.table)
+smooth_table4 <- tibble::rownames_to_column(smooth_table4, var = "Smooth Term")
+
+# Display both tables
+kable(parametric_table4, caption = "Parametric Terms for GAM Model 3")
+kable(smooth_table4, caption = "Smooth Terms for GAM Model 3")
+
+```
+
+All three GAM models show statistically significant effects for all included variables based on p-values, indicating that each predictor contributes meaningfully to the model. Comparing Model 1 and Model 2, although Model 2 achieves a higher adjusted R-squared, the inclusion of a random effect for location results in a high estimated degrees of freedom (EDF), suggesting possible overfitting. This undermines the generalizability of the model despite the improvement in fit. When comparing Model 3 to Model 1, the generalized cross-validation (GCV) score of Model 3 is noticeably higher. While the numerical difference may seem small (less than 1), GCV values are sensitive indicators of a model’s ability to generalize to new data, and even modest increases can reflect substantial reductions in predictive reliability. Based on this, Model 1 maintains a preferable balance between fit, interpretability, and generalizability.
+
+## Tree-Based Machine Learning Models
+
+Now fitting the 5 machine learning regression models.
+
+```{r}
+# Train/test split
+set.seed(48)
+train_indices <- sample(1:nrow(filtered_data), 0.7 * nrow(filtered_data))
+train_data <- filtered_data[train_indices, ]
+test_data <- filtered_data[-train_indices, ]
+```
+
+### Regression Tree (Pruned)
+
+After fitting an initial, unrestricted regression tree to the data, I applied pruning by limiting the tree size to reduce the risk of overfitting. This step simplifies the model by retaining only the most informative splits. The resulting pruned tree is visualized in the figure below.
+
+```{r}
+# Regression Tree with Train/Test Split
+
+# 1. Fit a large initial tree using training data
+set.seed(123)
+tree_model <- rpart(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,   # <<-- use train_data instead of filtered_data
+  method = "anova",
+  control = rpart.control(cp = 0)  # grow full tree first
+)
+
+# 2. Plot complexity parameter table
+plotcp(tree_model)
+printcp(tree_model)
+
+# 3. Choose tree size manually
+# Example: You want a tree with around 5 terminal nodes
+desired_terminal_nodes <- 5
+
+# Look at the cp table and find the cp corresponding to around that size
+cptable <- tree_model$cptable
+
+# Find the cp for the desired number of splits (terminal nodes = splits + 1)
+target_splits <- desired_terminal_nodes - 1
+chosen_cp <- cptable[which(cptable[, "nsplit"] == target_splits), "CP"]
+
+# 4. If exact size not available, pick the closest one
+if(length(chosen_cp) == 0){
+  chosen_cp <- cptable[which.min(abs(cptable[, "nsplit"] - target_splits)), "CP"]
+}
+
+# 5. Prune tree based on chosen cp
+pruned_tree <- prune(tree_model, cp = chosen_cp)
+```
+
+
+```{r, fig.show='show', fig.cap="Pruned regression tree fitted to the training data"}
+# 6. Plot the pruned tree
+rpart.plot(
+  pruned_tree,
+  main = paste0("Pruned Regression Tree (", desired_terminal_nodes, " Terminal Nodes)"),
+  type = 2,
+  extra = 101,
+  under = TRUE,
+  box.palette = "Blues",
+  shadow.col = "gray",
+  branch.lty = 3
+)
+
+```
+
+### Bagging
+
+Using the bagging method, I trained a model on multiple bootstrapped samples of the dataset.From the fitted model, a variable importance plot was generated to identify which predictors contributed most to the model’s accuracy.
+
+```{r, fig.show='show', fig.cap="Variable importance plot from the bagging model"}
+# 1. Fit a Bagging Model
+set.seed(123)
+bagging_model <- randomForest(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  mtry = 4,         # mtry = number of predictors --> all predictors
+  ntree = 500,      # Number of trees
+  importance = TRUE
+)
+
+
+# 4. Variable Importance Plot
+varImpPlot(bagging_model, main = "Bagging: Variable Importance")
+
+```
+
+### Random forest
+
+Similarly, a variable importance plot was generated using the Random Forest model. The importance plot highlights the most influential variables contributing to the prediction of traffic volume.
+
+```{r}
+# 1. Fit a Random Forest Model
+set.seed(123)
+rf_model <- randomForest(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  mtry = 2,         # mtry < total predictors (we have 4 predictors)
+  ntree = 500,      # Number of trees
+  importance = TRUE
+)
+
+# 2. View model summary
+print(rf_model)
+```
+
+
+```{r, fig.show='show', fig.cap="Variable importance plot from the random forest model"}
+# 4. Variable Importance Plot
+varImpPlot(rf_model, main = "Random Forest: Variable Importance")
+```
+
+### Boosting
+
+For the Boosting model, Mean Squared Error (MSE) was used as the evaluation metric to assess performance across different shrinkage values. As shrinkage increased, the MSE generally decreased, suggesting improved model fit. However, higher shrinkage also raises the risk of overfitting.
+
+```{r, fig.show='show', fig.cap="Training MSE plotted against shrinkage values for the boosting model"}
+
+# Define shrinkage (lambda) values to test
+shrinkage_values <- c(0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.3)
+
+# Store MSE results
+mse_results <- numeric(length(shrinkage_values))
+
+# Loop through shrinkage values and train models
+for (i in seq_along(shrinkage_values)) {
+  boost_model <- gbm(
+    log_volume ~ hour + Toronto + is_weekend + pandemic,
+    data = train_data,
+    distribution = "gaussian",  # for regression
+    n.trees = 1000,
+    interaction.depth = 3,      # depth of tree
+    shrinkage = shrinkage_values[i], 
+    verbose = FALSE
+  )
+  
+  # Predict on training set
+  pred <- predict(boost_model, newdata = train_data, n.trees = 1000)
+  
+  # Calculate training MSE
+  mse_results[i] <- mean((pred - train_data$log_volume)^2)
+}
+
+# Plot shrinkage vs MSE
+plot(shrinkage_values, mse_results, type = "b", pch = 19,
+     xlab = "Shrinkage (λ)",
+     ylab = "Training MSE",
+     main = "Training MSE vs Shrinkage in Boosting")
+
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Shrinkage values to test
+shrinkage_values <- c(0.05, 0.1, 0.2)
+```
+
+To balance predictive performance and model generalizability, I selected shrinkage values of 0.05, 0.1, and 0.2 for further visualization. Based on the MSE versus shrinkage plots, the optimal hyperparameter combination was found to be 1,000 trees with a shrinkage rate of 0.1. This choice achieves low error without overfitting.
+
+```{r, fig.show='show', fig.cap="Training error and cross-validation error across boosting iterations for different shrinkage values"}
+# Loop through shrinkage values
+for (lambda in shrinkage_values) {
+  cat("Running shrinkage =", lambda, "\n")
+  
+  # Fit boosting model with 5-fold cross-validation
+  boost_model <- gbm(
+    log_volume ~ hour + Toronto + is_weekend + pandemic,
+    data = train_data,
+    distribution = "gaussian",
+    n.trees = 3000,
+    interaction.depth = 3,
+    shrinkage = lambda,
+    cv.folds = 5,
+    verbose = FALSE
+  )
+  
+  # Plot training error and CV error
+  plot(boost_model$train.error, 
+       cex.lab = 1.5, cex.axis = 1.5, col = "red", type = "l", lwd = 2, 
+       ylim = range(c(boost_model$train.error, boost_model$cv.error)), 
+       ylab = "Error", xlab = "Number of Trees", 
+       main = paste("Shrinkage =", lambda))
+  lines(boost_model$cv.error, col = "blue", lwd = 2)
+  legend("topright", legend = c("Training Error", "CV Error"), col = c("red", "blue"), lwd = 2)
+}
+
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(301)
+
+# Final boosting model with best shrinkage
+final_boost <- gbm(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,
+  distribution = "gaussian",
+  n.trees = 1000,
+  interaction.depth = 3,
+  shrinkage = 0.1,
+  verbose = FALSE
+)
+```
+
+As with other tree-based models, a variable importance plot was also generated to highlight the most influential predictors.
+
+```{r, fig.show='show', fig.cap="Variable importance plot for the final boosting model"}
+# Variable Importance Plot
+par(cex.axis = 0.7)
+summary(final_boost, las = 1)  # las=1 makes y-labels horizontal
+
+```
+
+### XGBoost
+
+Finally, for XGBoost, we performed hyperparameter tuning to identify the optimal combination for model performance. By evaluating multiple pairs of max_depth and eta values, the best-performing configuration was found to be a maximum depth of 4 and a learning rate (eta) of 0.1.
+
+```{r}
+cl <- makeCluster(4)  
+registerDoParallel(cl)
+
+train_control <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+tune_grid <- expand.grid(
+  nrounds = seq(100, 500, by = 100),
+  max_depth = c(2, 4, 6),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+set.seed(301)
+xgb_model <- train(
+  log_volume ~ hour + Toronto + is_weekend + pandemic,
+  data = train_data,  # no splitting needed
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = tune_grid,
+  na.action = na.omit,
+  verbosity = 0
+)
+
+stopCluster(cl)
+
+# Print and plot
+xgb_model$results
+```
+
+
+
+```{r, results='show'}
+kable(xgb_model$bestTune)
+```
+
+This result aligns with the trends observed in the cross-validation RMSE visualization, indicating both low prediction error and a reduced risk of overfitting.
+
+```{r, fig.show='show', fig.cap="Variable importance plot generated from the trained XGBoost model"}
+varImp(xgb_model)
+plot(varImp(xgb_model))
+```
+
+Based on this optimal setting, a variable importance plot was generated to highlight the predictors that contributed most significantly to traffic volume prediction.
+
+```{r, fig.show='show', fig.cap="Cross-validation RMSE curves across boosting rounds in XGBoost"}
+ggplot(xgb_model$results, aes(x = nrounds, y = RMSE, color = factor(eta))) +
+  geom_line(aes(linetype = factor(max_depth))) +
+  labs(
+    title = "XGBoost Cross-Validation RMSE by nrounds",
+    x = "Number of Boosting Rounds (nrounds)",
+    y = "RMSE",
+    color = "Learning Rate (eta)",
+    linetype = "Max Depth"
+  ) +
+  theme_minimal()
+
+```
+
+# Conclusion
+
+Statistical modeling: Based on the comparison of estimated degrees of freedom (EDF), generalized cross-validation (GCV) scores, and adjusted R-squared values, we can conclude that the first statistical model offers the best overall balance between model complexity, predictive accuracy, and generalizability.
+Therefore, we can conclude from the modeling results that hour of the day and weekday/weekend distinction are the most influential predictors of traffic volume. Fuel price shows a weaker but non-linear influence on traffic patterns. Additionally, traffic volume experienced a significant decrease during the pandemic period, highlighting its substantial impact.
+
+Regression models: Below is a table summarizing the Mean Squared Error (MSE) values for the five regression methods based on the testing dataset. Among them, XGBoost yields the lowest MSE, indicating it achieves the highest prediction accuracy and generalizes best to unseen data.
+
+```{r, results='show'}
+# Predict and compute Test MSE for each model
+
+# 1. Regression Tree
+pred_tree <- predict(pruned_tree, newdata = test_data)
+mse_tree <- mean((pred_tree - test_data$log_volume)^2)
+
+# 2. Bagging
+pred_bagging <- predict(bagging_model, newdata = test_data)
+mse_bagging <- mean((pred_bagging - test_data$log_volume)^2)
+
+# 3. Random Forest
+pred_rf <- predict(rf_model, newdata = test_data)
+mse_rf <- mean((pred_rf - test_data$log_volume)^2)
+
+# 4. Boosting
+pred_boost <- predict(final_boost, newdata = test_data, n.trees = 1000) 
+mse_boost <- mean((pred_boost - test_data$log_volume)^2)
+
+# 5. XGBoost
+pred_xgb <- predict(xgb_model, newdata = test_data)
+mse_xgb <- mean((pred_xgb - test_data$log_volume)^2)
+
+# Combine results into a table
+mse_results <- data.frame(
+  Method = c("Regression Tree", "Bagging", "Random Forest", "Boosting", "XGBoost"),
+  Test_MSE = round(c(mse_tree, mse_bagging, mse_rf, mse_boost, mse_xgb), 4)
+)
+
+# View the table
+kable(mse_results)
+
+```
+
+The analysis presented in this report has provided valuable insights into the factors influencing traffic volume in Toronto, but several limitations remain. A major constraint is the absence of most 2020 traffic data, which complicates efforts to analyze the pandemic's full impact. Additionally, the set of monitored locations varies across dates, which introduces inconsistency and limits comparability. Despite these challenges, the models still capture meaningful patterns. 
+Looking forward, the analysis could be expanded by incorporating broader economic indicators—such as vehicle prices, unemployment rates, or public transit usage—to further enhance our understanding of urban traffic dynamics.
